@@ -1,0 +1,356 @@
+library(SeuratWrappers)
+library(Banksy)
+library(dplyr)
+library(patchwork)
+library(ggplot2)
+library(readxl)
+library(Seurat)
+
+object <- readRDS("objects/Visium_DCIS_zoomed.rds")
+object
+
+# This sets the size of points in the spatial plots
+pt_size_factor <- 13
+
+# Color defaults for clusters
+distinct_palette <- c(
+  "0" = "#1f77b4",
+  "1" = "#ff7f0e",
+  "2" = "#2ca02c",
+  "3" = "#d62728",
+  "4" = "#9467bd",
+  "5" = "#8c564b",
+  "6" = "#ff99cc",
+  "7" = "#7f7f7f",
+  "8" = "#bcbd22",
+  "9" = "#17becf",
+  "10" = "#393b79",
+  "11" = "#637939",
+  "12" = "#8c6d31"
+)
+
+# Cell type colors
+celltype_cols <- c(
+  "CD8.T.cells" = "green4",
+  "CD4.T.cells" = "blue",
+  "B.cell" = "#F781BF",
+  "Plasma" = "#FF7F00",
+  "Monocytes" = "purple",
+  "Macrophages" = "#b15928",
+  "DCs" = "#17becf",
+  "Endothelial.cells" = "#E41A1C",
+  "CAF" = "#984ea3",
+  "Basal_Myoepithelial" = "mediumseagreen",
+  "Epithelial.cells" = "#fdbf6f",
+  "Fibroblasts" = "darkgrey",
+  "Luminal.progenitor" = "navy",
+  "Luminal.mature" = "#bcbd22",
+  "Tumor" = "magenta",
+  "NK.cells" = "lavender",
+  "Mast.cells" = "green2",
+  "Adipocytes" = "lightgrey",
+  "Other" = "lightgrey"
+)
+
+epi_type_cols <- c(
+  "Basal_Myoepithelial" = "mediumseagreen",
+  "Luminal.progenitor" = "navy",
+  "Luminal.mature" = "#bcbd22",
+  "Tumor" = "magenta"
+)
+
+counts_violin <- VlnPlot(
+  object,
+  features = "nCount_Spatial.008um",
+  pt.size = 0,
+  raster = FALSE
+) +
+  NoLegend()
+
+counts_spatial <- SpatialFeaturePlot(
+  object,
+  features = "nCount_Spatial.008um",
+  pt.size.factor = pt_size_factor,
+  image.alpha = 0.8,
+  alpha = c(1, 1)
+) +
+  theme(legend.position = "right")
+
+genes_violin <- VlnPlot(
+  object,
+  features = "nFeature_Spatial.008um",
+  pt.size = 0,
+  raster = FALSE
+) +
+  NoLegend()
+
+genes_spatial <- SpatialFeaturePlot(
+  object,
+  features = "nFeature_Spatial.008um",
+  pt.size.factor = pt_size_factor,
+  image.alpha = 0.8,
+  alpha = c(1, 1)
+) +
+  theme(legend.position = "right")
+
+mt_violin <- VlnPlot(
+  object,
+  features = "MT.percent",
+  pt.size = 0,
+  raster = FALSE
+) +
+  NoLegend()
+
+mt_spatial <- SpatialFeaturePlot(
+  object,
+  features = "MT.percent",
+  pt.size.factor = pt_size_factor,
+  max.cutoff = "q99",
+  image.alpha = 0.8,
+  alpha = c(1, 1)
+) +
+  theme(legend.position = "right")
+
+# Combine the plots using 'patchwork'
+p0 <- (counts_violin | counts_spatial) /
+  (genes_violin | genes_spatial) /
+  (mt_violin | mt_spatial)
+p0
+
+# UMI and Gene Threshold
+object$QCFilter <- ifelse(
+  object$MT.percent < 25 &
+    object$nCount_Spatial.008um > 10 &
+    object$nFeature_Spatial.008um > 10,
+  yes = "Keep", no = "Remove"
+)
+
+table(object$QCFilter)
+
+p1 <- SpatialDimPlot(object,
+                     group.by = "QCFilter",
+                     pt.size.factor = pt_size_factor,
+                     image.alpha = 0.2,
+                     alpha = c(1, 0.2)
+) +
+  guides(fill = guide_legend(override.aes = list(size = 4)))
+counts_spatial | p1
+
+keep_cells <- colnames(object)[object$QCFilter == "Keep"]
+object <- subset(object, cells = keep_cells)
+
+###Important step; missed explanation
+object <- UpdateSeuratObject(object)
+
+# We find variable features and scale after quality filtering
+object <- FindVariableFeatures(object)
+object <- ScaleData(object)
+object
+
+# Run Banksy - takes a very long time when you have a lot of bins to process
+object <- RunBanksy(object,
+                    lambda = 0.8,
+                    assay = "Spatial.008um",
+                    slot = "data",
+                    features = "variable",
+                    k_geom = 24,
+                    verbose = TRUE
+)
+object
+
+object <- RunPCA(object,
+                 assay = "BANKSY",
+                 reduction.name = "pca.banksy",
+                 features = rownames(object),
+                 npcs = 20
+)
+
+ElbowPlot(object, reduction = "pca.banksy")
+
+object <- FindNeighbors(object,
+                        reduction = "pca.banksy",
+                        dims = 1:15
+)
+
+object <- FindClusters(object,
+                       cluster.name = "banksy_cluster",
+                       resolution = 0.3
+)
+
+object <- RunUMAP(object,
+                  reduction = "pca.banksy",
+                  reduction.name = "umap.banksy",
+                  return.model = T,
+                  dims = 1:15
+)
+
+
+Idents(object) <- "banksy_cluster"
+
+p2 <- SpatialDimPlot(object,
+                     group.by = "banksy_cluster",
+                     pt.size.factor = pt_size_factor,
+                     label = F,
+                     label.size = 5,
+                     image.alpha = 0.2,
+                     alpha = c(1, 1)
+) +
+  scale_fill_manual(values = distinct_palette) +
+  ggtitle("Banksy Neighborhood Clustering") +
+  theme(
+    legend.position = "right",
+    legend.key.size = unit(0.5, "cm")
+  ) +
+  guides(fill = guide_legend(override.aes = list(size = 5)))
+
+DefaultAssay(object) <- "BANKSY"
+Idents(object) <- "banksy_cluster"
+
+p3 <- DimPlot(object,
+              reduction = "umap.banksy",
+              label = TRUE,
+              label.size = 2,
+              raster = FALSE
+) +
+  scale_color_manual(values = distinct_palette) +
+  ggtitle("Banksy Neighborhood Clustering") +
+  theme(
+    legend.position = "right",
+    aspect.ratio = 1,
+    legend.key.size = unit(0.5, "cm")
+  ) +
+  guides(fill = guide_legend(override.aes = list(size = 5)))
+
+final_plot <- wrap_plots(p2, p3, ncol = 2)
+final_plot
+
+DefaultAssay(object) <- "Spatial.008um"
+
+# Sketch the dataset
+object <- SketchData(
+  object = object,
+  ncells = 10000,
+  features = VariableFeatures(object),
+  method = "LeverageScore",
+  sketched.assay = "sketch"
+)
+
+DefaultAssay(object) <- "Spatial.008um"
+
+# Sketch the dataset
+object <- SketchData(
+  object = object,
+  ncells = 10000,
+  features = VariableFeatures(object),
+  method = "LeverageScore",
+  sketched.assay = "sketch"
+)
+object
+
+# switch analysis to sketched cells
+DefaultAssay(object) <- "sketch"
+
+# Perform the clustering workflow
+object <- FindVariableFeatures(object)
+object <- ScaleData(object)
+object <- RunPCA(object, assay = "sketch", reduction.name = "pca.sketch")
+ElbowPlot(object, reduction = "pca.sketch")
+
+object <- FindNeighbors(object,
+                        assay = "sketch",
+                        reduction = "pca.sketch",
+                        dims = 1:15
+)
+
+object <- FindClusters(object,
+                       cluster.name = "seurat_cluster.sketched",
+                       resolution = 0.5
+)
+object <- RunUMAP(object,
+                  reduction = "pca.sketch",
+                  reduction.name = "umap.sketch",
+                  return.model = T,
+                  dims = 1:15
+)
+
+object <- ProjectData(
+  object = object,
+  assay = "Spatial.008um",
+  full.reduction = "full.pca.sketch",
+  sketched.assay = "sketch",
+  sketched.reduction = "pca.sketch",
+  umap.model = "umap.sketch",
+  dims = 1:15,
+  refdata = list(seurat_cluster.projected = "seurat_cluster.sketched")
+)
+object
+
+DefaultAssay(object) <- "sketch"
+Idents(object) <- "seurat_cluster.sketched"
+
+p4 <- DimPlot(object,
+              reduction = "umap.sketch",
+              label = T,
+              raster = F
+) +
+  scale_color_manual(values = distinct_palette) +
+  ggtitle("Sketched clustering (10,000 cells)") +
+  theme(
+    legend.key.size = unit(0.5, "cm"),
+    aspect.ratio = 1
+  ) +
+  guides(fill = guide_legend(override.aes = list(size = 5)))
+
+# switch to full dataset
+DefaultAssay(object) <- "Spatial.008um"
+Idents(object) <- "seurat_cluster.projected"
+
+p5 <- DimPlot(object,
+              reduction = "full.umap.sketch",
+              label = T,
+              raster = F
+) +
+  scale_color_manual(values = distinct_palette) +
+  ggtitle("Projected clustering (full dataset)") +
+  theme(
+    legend.key.size = unit(0.5, "cm"),
+    aspect.ratio = 1
+  ) +
+  guides(fill = guide_legend(override.aes = list(size = 5)))
+
+final_plot <- wrap_plots(p4, p5, ncol = 2)
+final_plot
+
+DefaultAssay(object) <- "Spatial.008um"
+Idents(object) <- "seurat_cluster.projected"
+
+p6 <- SpatialDimPlot(object,
+                     group.by = "seurat_cluster.projected",
+                     pt.size.factor = pt_size_factor,
+                     image.alpha = 0.2,
+                     alpha = c(1, 1)
+) +
+  scale_fill_manual(values = distinct_palette) +
+  ggtitle("Projected clustering (full dataset)") +
+  theme(legend.key.size = unit(0.5, "cm")) +
+  guides(fill = guide_legend(override.aes = list(size = 5)))
+
+final_plot <- wrap_plots(p2, p3, p6, p5, ncol = 2)
+final_plot
+
+# Here we create a cross-table of each cluster type
+prop_table <- prop.table(
+  table(
+    "Banksy" = object$banksy_cluster,
+    "Sketched" = object$seurat_cluster.projected
+  ),
+  margin = 1
+)
+ComplexHeatmap::Heatmap(prop_table,
+                        name = "Proportion",
+                        column_title = "Sketched",
+                        column_title_side = "bottom",
+                        row_title = "Banksy",
+                        row_title_side = "right",
+                        col = viridis::cividis(10)
+)
